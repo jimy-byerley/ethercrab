@@ -16,3 +16,7 @@ Cargo.lock
 /Cargo.lock
 /examples/*.pcapng
 /npcap-sdk-*
+
+# Custom
+/.devcontainer
+/.vs

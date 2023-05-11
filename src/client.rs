@@ -193,8 +193,27 @@ impl<'sto> Client<'sto> {
     pub async fn init<const MAX_SLAVES: usize, G>(
         &self,
         groups: G,
-        mut group_filter: impl for<'g> FnMut(&'g G, &Slave) -> Result<&'g dyn SlaveGroupHandle, Error>,
+        group_filter: impl for<'g> FnMut(&'g G, &Slave) -> Result<&'g dyn SlaveGroupHandle, Error>,
     ) -> Result<G, Error> {
+
+        //Search slave, initialize it and buil group
+        let mut slaves : heapless::Deque<Slave, MAX_SLAVES> = self.init_slaves().await?;
+        let retg : G = self.configure_slave_group(PdiOffset::default(), groups, &mut slaves, group_filter).await?;
+
+        // Wait for all slaves to reach SAFE-OP
+        self.wait_for_state(SlaveState::SafeOp).await?;
+
+        Ok(retg)
+    }
+
+    /// Detect slaves, set their configured station addresses and return it in the heapless deque
+    ///
+    /// This method is used by 'init<const MAX_SLAVES: usize, G>' function, but il also available in standalone
+    /// for the case where neead a separation initialisation and detection.
+    ///
+    /// `MAX_SLAVES` must be a power of 2 greater than 1.
+    pub async fn init_slaves<const MAX_SLAVES: usize>(&self) -> Result<heapless::Deque<Slave, MAX_SLAVES>,Error> {
+
         self.reset_slaves().await?;
 
         // Each slave increments working counter, so we can use it as a total count of slaves
@@ -226,7 +245,6 @@ impl<'sto> Client<'sto> {
         }
 
         log::debug!("Configuring topology/distributed clocks");
-
         // Configure distributed clock offsets/propagation delays, perform static drift
         // compensation. We need the slaves in a single list so we can read the topology.
         let dc_master = dc::configure_dc(self, slaves.as_mut_slices().0).await?;
@@ -236,15 +254,33 @@ impl<'sto> Client<'sto> {
             dc::run_dc_static_sync(self, dc_master, self.config.dc_static_sync_iterations).await?;
         }
 
-        // A unique list of groups so we can iterate over them and assign consecutive PDIs to each
-        // one.
+        return Ok(slaves);
+    }
+
+    /// Configure slave from EEPROM and assign it a group.
+    ///
+    /// This method is used by 'init<const MAX_SLAVES: usize, G>' function, but il also available in standalone
+    /// for the case where neead a separation initialisation and detection. PDI offset must be explicetely
+    /// specfiy regard default value assigned in 'init' methode
+    ///
+    /// 'slaves' are the list of detected device. This array in consume group constituion
+    ///
+    /// `MAX_SLAVES` must be a power of 2 greater than 1.
+    pub async fn configure_slave_group<const MAX_SLAVES: usize, G>(
+        &self,
+        start_offset :  PdiOffset,
+        groups: G,
+        slaves : &mut heapless::Deque<Slave,MAX_SLAVES>,
+        mut group_filter: impl for<'g> FnMut(&'g G, &Slave) -> Result<&'g dyn SlaveGroupHandle, Error>)
+         -> Result<G,Error> {
+
+        // A unique list of groups so we can iterate over them and assign consecutive PDIs to each one.
         let mut group_map = FnvIndexMap::<_, _, MAX_SLAVES>::new();
 
         while let Some(slave) = slaves.pop_front() {
-            let group = group_filter(&groups, &slave)?;
+            let group: &dyn SlaveGroupHandle = group_filter(&groups, &slave)?;
 
-            // SAFETY: This mutates the internal slave list, so a reference to `group` may not be
-            // held over this line.
+            // SAFETY: This mutates the internal slave list, so a reference to `group` may not be held over this line.
             unsafe { group.push(slave)? };
 
             group_map
@@ -252,23 +288,19 @@ impl<'sto> Client<'sto> {
                 .map_err(|_| Error::Capacity(Item::Group))?;
         }
 
-        let mut offset = PdiOffset::default();
-
+        let mut offset: PdiOffset = start_offset;
         for (id, group) in group_map.into_iter() {
-            // SAFETY: This internally mutates the group. No other references may be held accross
-            // this line.
-            offset = unsafe { group.configure_from_eeprom(offset, self).await? };
-
+            // SAFETY: This internally mutates the group. No other references may be held accross this line.
+            // offset = unsafe { group.configure_from_eeprom(offset, self).await? };
+            offset = group.initialize_from_eeprom::<MAX_SLAVES>(offset, self).await?;
             log::debug!("After group ID {id} offset: {:?}", offset);
         }
-
         log::debug!("Total PDI {} bytes", offset.start_address);
 
-        // Wait for all slaves to reach SAFE-OP
-        self.wait_for_state(SlaveState::SafeOp).await?;
+        return Ok(groups);
 
-        Ok(groups)
     }
+
 
     /// Get the number of discovered slaves in the EtherCAT network.
     ///

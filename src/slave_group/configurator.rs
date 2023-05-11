@@ -11,6 +11,11 @@ use crate::{
     Client, SlaveGroup,
 };
 use core::{cell::UnsafeCell, time::Duration};
+// use tokio::{
+//     task::{self, JoinHandle, spawn},
+//     runtime::Builder
+// };
+use futures::future::try_join_all;
 
 #[derive(Debug)]
 struct GroupInnerRef<'a> {
@@ -57,8 +62,7 @@ impl<'a> SlaveGroupRef<'a> {
 
     pub(crate) async unsafe fn configure_from_eeprom<'sto>(
         &self,
-        // We need to start this group's PDI after that of the previous group. That offset is passed
-        // in via `start_offset`.
+        // We need to start this group's PDI after that of the previous group. That offset is passed in via `start_offset`.
         mut global_offset: PdiOffset,
         client: &'sto Client<'sto>,
     ) -> Result<PdiOffset, Error> {
@@ -194,5 +198,109 @@ impl<'a> SlaveGroupRef<'a> {
 
             Ok(global_offset)
         }
+    }
+
+
+    /// Configure slave group from eeprom value. This method is a part of configure_from_eeprom function
+    /// Init all slave and set synchronization parameters
+    pub(crate) async fn initialize_from_eeprom<'sto, const MAX_SLAVES: usize>(&self, mut global_offset: PdiOffset, client: &'sto Client<'sto>) -> Result<PdiOffset, Error> {
+
+        let inner: &mut GroupInnerRef = unsafe { &mut *self.inner.get() };
+
+        log::debug!("Going to configure group with {} slave(s), starting PDI offset {:#08x}", inner.slaves.len(), global_offset.start_address);
+
+        // Set the starting position in the PDI for this group's segment
+        *inner.start_address = global_offset.start_address;
+
+        let mut tasks = heapless::Vec::<_,MAX_SLAVES>::new();
+        for slave in inner.slaves.iter_mut() {
+            tasks.push(self.initialize_slave_config(slave, client));
+        }
+
+        // We're in PRE-OP at this point
+        for result in try_join_all(tasks).await.unwrap().iter_mut() {
+            global_offset = result.configure_fmmus(global_offset, *inner.start_address, PdoDirection::MasterRead).await?;
+        }
+
+        // Configure master read PDI mappings in the first section of the PDI
+        *inner.read_pdi_len = (global_offset.start_address - *inner.start_address) as usize;
+
+        log::debug!("Slave mailboxes configured and init hooks called");
+
+        for slave in inner.slaves.iter_mut() {
+
+            let addr : u16 = slave.configured_address.clone();
+            let name : heapless::String<64> = slave.name.clone();
+            let mut slave_config_n = SlaveConfigurator::new(client, slave);
+
+            // Still in PRE-OP
+            global_offset = slave_config_n.configure_fmmus(global_offset, *inner.start_address, PdoDirection::MasterWrite).await?;
+
+            if false { self.set_synchronization(addr, name, client, None, None).await?; }
+
+            // We're done configuring FMMUs, etc, now we can request this slave go into SAFE-OP
+            slave_config_n.request_safe_op_nowait().await?;
+
+            // We have both inputs and outputs at this stage, so can correctly calculate the group WKC.
+            *inner.group_working_counter += slave.config.io.working_counter_sum();
+        }
+
+        log::debug!("Slave FMMUs configured for group. Able to move to SAFE-OP");
+
+        let pdi_len = (global_offset.start_address - *inner.start_address) as usize;
+
+        log::debug!( "Group PDI length: start {}, {} total bytes ({} input bytes)", inner.start_address, pdi_len, *inner.read_pdi_len );
+
+        if pdi_len > self.max_pdi_len {
+            Err(Error::PdiTooLong { max_length: self.max_pdi_len, desired_length: pdi_len })
+        } else {
+            *inner.pdi_len = pdi_len;
+            Ok(global_offset)
+        }
+    }
+
+    /// Initialize a slave configutor and execute a preop hook on it
+    async fn initialize_slave_config<'sto>(&self,  slave:  &'sto mut Slave, client: &'sto Client<'sto>) -> Result<SlaveConfigurator<'sto>, Error> {
+        let mut slave_config: SlaveConfigurator = SlaveConfigurator::new(client, slave);
+        slave_config.configure_mailboxes().await.unwrap(); //await
+
+        // Use ???
+        // if let Some(hook) = self.preop_safeop_hook {
+        //     let conf = slave_config.as_ref();
+        //     let fut = (hook)(&conf);
+
+        //     fut.await.unwrap();
+        // }
+
+        return Ok(slave_config);
+    }
+
+    /// Configure time for slave client
+    /// cycle_t Time in ms associate to cyle of TxRx? - If 'Option::None' use 2ms as default
+    /// startup_t Delay in ms assocation to the begining of TxRx? - If 'Option::None' use 100ms as default
+    async fn set_synchronization<'sto>(&self, addr : u16, name : heapless::String<64>, client : &'sto Client<'sto>,
+        startup_t : Option<u64>, cycle_t : Option<u64>) -> Result<(), Error> {
+
+        // FIXME: Just first slave or all slaves? if name == "EL2004" { // if i == 0 {
+        log::info!("Slave {:#06x} {} DC", addr, name);
+
+        let sl = SlaveClient::new(client, addr);
+
+        let cycle_time = Duration::from_millis(cycle_t.unwrap_or(2 )).as_nanos() as u32;
+        let startup_delay = Duration::from_millis(startup_t.unwrap_or(100)).as_nanos() as u32;
+
+        // Disable sync signals
+        sl.write(RegisterAddress::DcSyncActive, 0x00u8, "disable sync").await?;
+
+        let local_time: u32 = sl.read(RegisterAddress::DcSystemTime, "local time").await?;
+        let start_time = local_time + cycle_time + startup_delay;
+
+        sl.write(RegisterAddress::DcSyncStartTime, start_time, "sync start time").await?;
+        sl.write(RegisterAddress::DcSync0CycleTime, cycle_time, "sync cycle time").await?;
+
+        // Enable cyclic operation (0th bit) and sync0 signal (1st bit)
+        sl.write(RegisterAddress::DcSyncActive, 0b11u8, "enable sync0").await?;
+
+        return Ok(());
     }
 }
