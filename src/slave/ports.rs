@@ -23,7 +23,7 @@ impl Port {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Topology {
     /// The slave device has two open ports, with only upstream and downstream slaves.
     Passthrough,

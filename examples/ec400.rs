@@ -8,6 +8,8 @@ use ethercrab::{
     error::Error,
     std::tx_rx_task,
     Client, ClientConfig, PduStorage, SlaveGroup, SlaveState, SubIndex, Timeouts,
+    slave::Slave,
+    pdi::PdiOffset
 };
 use std::{
     sync::{
@@ -112,11 +114,20 @@ async fn main() -> Result<(), Error> {
         })
     });
 
-    let group = client
-        // Initialise a single group
-        .init::<MAX_SLAVES, _>(group, |group, _slave| Ok(group))
-        .await
-        .expect("Init");
+    // let group = client
+    //     // Initialise a single group
+    //     .init::<MAX_SLAVES, _>(group, |group, _slave| Ok(group))
+    //     .await
+    //     .expect("Init");
+
+    //Replace line above
+    //Start of slave group init and config
+    let mut slaves : heapless::Deque<Slave, MAX_SLAVES> = client.init_slaves::<MAX_SLAVES>().await.expect("Init group");
+    //Do what the f*** you want
+    let group = client.configure_slave_group::<MAX_SLAVES, _>(PdiOffset::default(), group, &mut slaves, |group, _slave| Ok(group)).await.expect("Config slave group");
+    //Do what the f*** you want
+    client.wait_for_state(SlaveState::SafeOp).await.expect("Wait for state");
+    //End of slave group init and config
 
     client
         .request_slave_state(SlaveState::Op)

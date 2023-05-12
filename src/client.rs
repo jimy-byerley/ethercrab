@@ -206,6 +206,32 @@ impl<'sto> Client<'sto> {
         Ok(retg)
     }
 
+    /// Same constructuon as init function above, but take closure in argument to execute intermediate operation
+    /// TODO: test - Fn Usefull? -
+    pub async fn advanced_init<const MAX_SLAVES: usize, G>(
+        &self,
+        groups: G,
+        post_init_op: fn(&mut heapless::Deque<Slave, MAX_SLAVES>) -> Result<(),Error>,
+        group_filter: impl for<'g> FnMut(&'g G, &Slave) -> Result<&'g dyn SlaveGroupHandle, Error>,
+        post_config:  fn(&mut G) -> Result<(),Error>,
+    ) -> Result<G, Error> {
+
+        //Search slave, initialize it and buil group
+        let mut slaves : heapless::Deque<Slave, MAX_SLAVES> = self.init_slaves().await?;
+
+        post_init_op(&mut slaves).unwrap();
+
+        let mut retg : G = self.configure_slave_group(PdiOffset::default(), groups, &mut slaves, group_filter).await?;
+
+        post_config(&mut retg).unwrap();
+
+        // Wait for all slaves to reach SAFE-OP
+        self.wait_for_state(SlaveState::SafeOp).await?;
+
+        Ok(retg)
+    }
+
+
     /// Detect slaves, set their configured station addresses and return it in the heapless deque
     ///
     /// This method is used by 'init<const MAX_SLAVES: usize, G>' function, but il also available in standalone

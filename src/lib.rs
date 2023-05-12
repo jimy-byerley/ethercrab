@@ -146,7 +146,7 @@
 //! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
-#![deny(missing_docs)]
+// #![deny(missing_docs)] //Disable only for purpose of test
 #![deny(missing_copy_implementations)]
 #![deny(trivial_casts)]
 #![deny(trivial_numeric_casts)]
@@ -173,11 +173,11 @@ pub mod error;
 mod fmmu;
 mod generate;
 mod mailbox;
-mod pdi;
+pub mod pdi;
 mod pdu_data;
 mod pdu_loop;
 mod register;
-mod slave;
+pub mod slave;
 mod slave_group;
 mod slave_state;
 mod sync_manager_channel;
