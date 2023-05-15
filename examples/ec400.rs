@@ -82,7 +82,7 @@ async fn main() -> Result<(), Error> {
 //                     .write_sdo(0x1600, SubIndex::Index(2), 0x60ff_0020u32)
 //                     .await?;
 //                 slave.write_sdo(0x1600, SubIndex::Index(0), 2u8).await?;
-// 
+//
 //                 slave.write_sdo(0x1a00, SubIndex::Index(0), 0u8).await?;
 //                 // Status word, u16
 //                 slave
@@ -97,15 +97,15 @@ async fn main() -> Result<(), Error> {
 //                     .write_sdo(0x1a00, SubIndex::Index(3), 0x606c_0020u32)
 //                     .await?;
 //                 slave.write_sdo(0x1a00, SubIndex::Index(0), 0x03u8).await?;
-// 
+//
 //                 slave.write_sdo(0x1c12, SubIndex::Index(0), 0u8).await?;
 //                 slave.write_sdo(0x1c12, SubIndex::Index(1), 0x1600).await?;
 //                 slave.write_sdo(0x1c12, SubIndex::Index(0), 1u8).await?;
-// 
+//
 //                 slave.write_sdo(0x1c13, SubIndex::Index(0), 0u8).await?;
 //                 slave.write_sdo(0x1c13, SubIndex::Index(1), 0x1a00).await?;
 //                 slave.write_sdo(0x1c13, SubIndex::Index(0), 1u8).await?;
-// 
+//
 //                 // Opmode - Cyclic Synchronous Position
 //                 // slave.write_sdo(0x6060, SubIndex::Index(0), 0x08).await?;
 //                 // Opmode - Cyclic Synchronous Velocity
@@ -125,14 +125,13 @@ async fn main() -> Result<(), Error> {
     // Replace line above
     // Start of slave group init and config
     let mut slaves : heapless::Deque<Slave, MAX_SLAVES> = client.init_slaves::<MAX_SLAVES>().await.expect("Init group");
-    // Do what the f*** you want
     let group = client.configure_slave_group::<MAX_SLAVES, _>(
-			PdiOffset::default(), 
-			group, 
-			&mut slaves, 
+			PdiOffset::default(),
+			group,
+			&mut slaves,
 			|group, _slave| Ok(group),
 			).await.expect("Config slave group");
-    
+
 	// configure slaves in group
 	for slave in &slaves {
 		let slave = SlaveRef::new(SlaveClient::new(&client, slave.configured_address), slave);
@@ -177,7 +176,7 @@ async fn main() -> Result<(), Error> {
 		// Opmode - Cyclic Synchronous Velocity
 		slave.write_sdo(0x6060, SubIndex::Index(0), 0x09u8).await?;
 	}
-	
+
     client.wait_for_state(SlaveState::SafeOp).await.expect("Wait for state");
     //End of slave group init and config
 

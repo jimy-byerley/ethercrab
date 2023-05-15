@@ -9,8 +9,10 @@ use crate::{
         Slave,
     },
     Client, SlaveGroup,
+    slave_group::offset_helper::OffsetHelper
 };
 use core::{cell::UnsafeCell, time::Duration};
+
 // use tokio::{
 //     task::{self, JoinHandle, spawn},
 //     runtime::Builder
@@ -60,6 +62,7 @@ impl<'a> SlaveGroupRef<'a> {
         }
     }
 
+    #[deprecated="Replace by the function initialize_from_eeprom"]
     pub(crate) async unsafe fn configure_from_eeprom<'sto>(
         &self,
         // We need to start this group's PDI after that of the previous group. That offset is passed in via `start_offset`.
@@ -203,7 +206,7 @@ impl<'a> SlaveGroupRef<'a> {
 
     /// Configure slave group from eeprom value. This method is a part of configure_from_eeprom function
     /// Init all slave and set synchronization parameters
-    pub(crate) async fn initialize_from_eeprom<'sto, const MAX_SLAVES: usize>(&self, mut global_offset: PdiOffset, client: &'sto Client<'sto>) -> Result<PdiOffset, Error> {
+    pub(crate) async fn initialize_from_eeprom<'sto, const MAX_SLAVES: usize>(&self, global_offset: PdiOffset, client: &'sto Client<'sto>) -> Result<PdiOffset, Error> {
 
         let inner: &mut GroupInnerRef = unsafe { &mut *self.inner.get() };
 
@@ -211,6 +214,7 @@ impl<'a> SlaveGroupRef<'a> {
 
         // Set the starting position in the PDI for this group's segment
         *inner.start_address = global_offset.start_address;
+        let mut offset_helper = OffsetHelper::new(global_offset, PdoDirection::MasterRead);
 
         let mut tasks = heapless::Vec::<_,MAX_SLAVES>::new();
         for slave in inner.slaves.iter_mut() {
@@ -219,14 +223,16 @@ impl<'a> SlaveGroupRef<'a> {
 
         // We're in PRE-OP at this point
         for result in try_join_all(tasks).await.unwrap().iter_mut() {
-            global_offset = result.configure_fmmus(global_offset, *inner.start_address, PdoDirection::MasterRead).await?;
+            _ = offset_helper.configure_fmmus(result).await?;
         }
 
         // Configure master read PDI mappings in the first section of the PDI
-        *inner.read_pdi_len = (global_offset.start_address - *inner.start_address) as usize;
+        log::debug!("{} Slave mailboxes configured", offset_helper.calling_cnt());
+        *inner.read_pdi_len = offset_helper.finish();
 
         log::debug!("Slave mailboxes configured and init hooks called");
 
+        let mut offset_helper = OffsetHelper::new(global_offset, PdoDirection::MasterWrite);
         for slave in inner.slaves.iter_mut() {
 
             let addr : u16 = slave.configured_address.clone();
@@ -234,7 +240,7 @@ impl<'a> SlaveGroupRef<'a> {
             let mut slave_config_n = SlaveConfigurator::new(client, slave);
 
             // Still in PRE-OP
-            global_offset = slave_config_n.configure_fmmus(global_offset, *inner.start_address, PdoDirection::MasterWrite).await?;
+            offset_helper.configure_fmmus(&mut slave_config_n).await?;
 
             if false { self.set_synchronization(addr, name, client, None, None).await?; }
 
@@ -247,7 +253,7 @@ impl<'a> SlaveGroupRef<'a> {
 
         log::debug!("Slave FMMUs configured for group. Able to move to SAFE-OP");
 
-        let pdi_len = (global_offset.start_address - *inner.start_address) as usize;
+        let pdi_len = offset_helper.finish();
 
         log::debug!( "Group PDI length: start {}, {} total bytes ({} input bytes)", inner.start_address, pdi_len, *inner.read_pdi_len );
 

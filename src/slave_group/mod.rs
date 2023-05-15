@@ -1,5 +1,6 @@
 mod configurator;
 mod group_slave;
+mod offset_helper;
 
 use crate::{
     error::{Error, Item},

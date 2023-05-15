@@ -562,6 +562,7 @@ impl<'a> SlaveConfigurator<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum PdoDirection {
     MasterRead,
     MasterWrite,
