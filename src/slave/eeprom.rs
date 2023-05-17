@@ -2,7 +2,7 @@ use num_enum::TryFromPrimitive;
 
 use super::SlaveRef;
 use crate::{
-    eeprom::types::{FmmuEx, FmmuUsage, Pdo, SyncManager},
+    eeprom::types::{FmmuEx, FmmuUsage, Pdo, SyncManager, PdoDirection},
     eeprom::{
         reader::EepromSectionReader,
         types::{
@@ -13,7 +13,7 @@ use crate::{
     error::{EepromError, Error, Item},
     slave::SlaveIdentity,
 };
-use core::{ops::RangeInclusive, str::FromStr};
+use core::str::FromStr;
 
 /// EEPROM methods.
 impl<'a, S> SlaveRef<'a, S> {
@@ -144,11 +144,16 @@ impl<'a, S> SlaveRef<'a, S> {
         Ok(mappings)
     }
 
-    async fn eeprom_pdos(
+    pub(crate) async fn eeprom_pdos(
         &self,
-        category: CategoryType,
-        valid_range: RangeInclusive<u16>,
+        direction: PdoDirection,
     ) -> Result<heapless::Vec<Pdo, 16>, Error> {
+    
+        let (category, valid_range) = match direction {
+            PdoDirection::MasterRead => (CategoryType::TxPdo, TX_PDO_RANGE),
+            PdoDirection::MasterWrite => (CategoryType::RxPdo, RX_PDO_RANGE),
+        };
+    
         let mut pdos = heapless::Vec::new();
 
         log::trace!("Get {:?} PDUs", category);
@@ -193,16 +198,6 @@ impl<'a, S> SlaveRef<'a, S> {
         log::debug!("Discovered PDOs:\n{:#?}", pdos);
 
         Ok(pdos)
-    }
-
-    /// Transmit PDOs (from device's perspective) - inputs
-    pub(crate) async fn eeprom_master_read_pdos(&self) -> Result<heapless::Vec<Pdo, 16>, Error> {
-        self.eeprom_pdos(CategoryType::TxPdo, TX_PDO_RANGE).await
-    }
-
-    /// Receive PDOs (from device's perspective) - outputs
-    pub(crate) async fn eeprom_master_write_pdos(&self) -> Result<heapless::Vec<Pdo, 16>, Error> {
-        self.eeprom_pdos(CategoryType::RxPdo, RX_PDO_RANGE).await
     }
 
     pub(crate) async fn eeprom_find_string<const N: usize>(

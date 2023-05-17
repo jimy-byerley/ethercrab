@@ -2,8 +2,9 @@ use super::{Slave, SlaveRef};
 use crate::{
     coe::SubIndex,
     eeprom::types::{
-        FmmuEx, FmmuUsage, MailboxProtocols, Pdo, SiiOwner, SyncManager, SyncManagerEnable,
-        SyncManagerType,
+        FmmuEx, FmmuUsage, MailboxProtocols, Pdo, SiiOwner, 
+        SyncManager, SyncManagerEnable, SyncManagerType,
+        PdoDirection,
     },
     error::{Error, Item},
     fmmu::Fmmu,
@@ -75,88 +76,47 @@ impl<'a> SlaveRef<'a, &'a mut Slave> {
             });
         }
 
-        let has_coe = self
-            .state
-            .config
-            .mailbox
-            .supported_protocols
-            .contains(MailboxProtocols::COE)
-            && self
-                .state
-                .config
-                .mailbox
-                .read
-                .map(|mbox| mbox.len > 0)
-                .unwrap_or(false);
-
-        log::debug!(
-            "Slave {:#06x} has CoE: {has_coe:?}",
-            self.configured_address
-        );
+        let segment = {
+            let has_coe = self.state.config.mailbox.supported_protocols
+                            .contains(MailboxProtocols::COE)
+                        && self.state.config.mailbox.read
+                            .map(|mbox| mbox.len > 0)
+                            .unwrap_or(false);
+            log::debug!(
+                "Slave {:#06x} has CoE: {has_coe:?}",
+                self.configured_address
+            );
+            
+            let range = if has_coe {
+                self.configure_pdos_coe(
+                    &sync_managers,
+                    &fmmu_usage,
+                    direction,
+                    &mut global_offset,
+                    ).await?
+            } else {
+                let pdos = self.eeprom_pdos(direction).await?;
+                log::trace!("Slave PDOs {:?} {:#?}", direction, &pdos);
+                
+                self.configure_pdos_eeprom(
+                    &sync_managers,
+                    &pdos,
+                    &fmmu_sm_mappings,
+                    &fmmu_usage,
+                    direction,
+                    &mut global_offset,
+                    ).await?
+            };
+            PdiSegment {
+                bytes: (range.bytes.start - group_start_address as usize)
+                    ..(range.bytes.end - group_start_address as usize),
+                .. range
+            }
+        };
 
         match direction {
-            PdoDirection::MasterRead => {
-                let pdos = self.eeprom_master_read_pdos().await?;
-
-                log::trace!("Slave inputs PDOs {:#?}", pdos);
-
-                let input_range = if has_coe {
-                    self.configure_pdos_coe(
-                        &sync_managers,
-                        &fmmu_usage,
-                        PdoDirection::MasterRead,
-                        &mut global_offset,
-                    )
-                    .await?
-                } else {
-                    self.configure_pdos_eeprom(
-                        &sync_managers,
-                        &pdos,
-                        &fmmu_sm_mappings,
-                        &fmmu_usage,
-                        PdoDirection::MasterRead,
-                        &mut global_offset,
-                    )
-                    .await?
-                };
-
-                self.state.config.io.input = PdiSegment {
-                    bytes: (input_range.bytes.start - group_start_address as usize)
-                        ..(input_range.bytes.end - group_start_address as usize),
-                    ..input_range
-                };
-            }
-            PdoDirection::MasterWrite => {
-                let pdos = self.eeprom_master_write_pdos().await?;
-
-                log::trace!("Slave outputs PDOs {:#?}", pdos);
-
-                let output_range = if has_coe {
-                    self.configure_pdos_coe(
-                        &sync_managers,
-                        &fmmu_usage,
-                        PdoDirection::MasterWrite,
-                        &mut global_offset,
-                    )
-                    .await?
-                } else {
-                    self.configure_pdos_eeprom(
-                        &sync_managers,
-                        &pdos,
-                        &fmmu_sm_mappings,
-                        &fmmu_usage,
-                        PdoDirection::MasterWrite,
-                        &mut global_offset,
-                    )
-                    .await?
-                };
-
-                self.state.config.io.output = PdiSegment {
-                    bytes: (output_range.bytes.start - group_start_address as usize)
-                        ..(output_range.bytes.end - group_start_address as usize),
-                    ..output_range
-                };
-            }
+            PdoDirection::MasterRead =>  {self.state.config.io.input  = segment},
+            PdoDirection::MasterWrite => {self.state.config.io.output = segment},
         }
 
         log::debug!(
@@ -170,7 +130,7 @@ impl<'a> SlaveRef<'a, &'a mut Slave> {
 
         Ok(global_offset)
     }
-
+   
     pub(crate) async fn request_safe_op_nowait(&self) -> Result<(), Error> {
         // Restore EEPROM mode
         self.set_eeprom_mode(SiiOwner::Pdi).await?;
@@ -303,12 +263,11 @@ impl<'a> SlaveRef<'a, &'a mut Slave> {
 
         let start_offset = *gobal_offset;
 
+        let mut total_bit_len = 0;
+
         // We must ignore the first two SM indices (SM0, SM1, sub-index 1 and 2, start at sub-index
         // 3) as these are used for mailbox communication.
         let sm_range = 3..=num_sms;
-
-        let mut total_bit_len = 0;
-
         // NOTE: This is a 1-based SDO sub-index
         for sm_mapping_sub_index in sm_range {
             let sm_type = self
@@ -316,21 +275,20 @@ impl<'a> SlaveRef<'a, &'a mut Slave> {
                 .await
                 .map(SyncManagerType::from_primitive)?;
 
-            let sync_manager_index = sm_mapping_sub_index - 1;
+            // this sm does not fit our direction need
+            if sm_type != desired_sm_type 
+                {continue;}
 
+            // zero-based index
+            let sync_manager_index = sm_mapping_sub_index - 1;
             let sm_address = SM_BASE_ADDRESS + u16::from(sync_manager_index);
 
-            let sync_manager =
-                sync_managers
+            let sync_manager = sync_managers
                     .get(usize::from(sync_manager_index))
                     .ok_or(Error::NotFound {
                         item: Item::SyncManager,
                         index: Some(usize::from(sync_manager_index)),
                     })?;
-
-            if sm_type != desired_sm_type {
-                continue;
-            }
 
             // Total number of PDO assignments for this sync manager
             let num_sm_assignments = self.sdo_read::<u8>(sm_address, SubIndex::Index(0)).await?;
@@ -388,8 +346,7 @@ impl<'a> SlaveRef<'a, &'a mut Slave> {
                     gobal_offset,
                     desired_sm_type,
                     &sm_config,
-                )
-                .await?;
+                    ).await?;
             }
 
             total_bit_len += sm_bit_len;
@@ -525,19 +482,5 @@ impl<'a> SlaveRef<'a, &'a mut Slave> {
             bit_len: total_bit_len.into(),
             bytes: start_offset.up_to(*offset),
         })
-    }
-}
-
-pub enum PdoDirection {
-    MasterRead,
-    MasterWrite,
-}
-
-impl PdoDirection {
-    fn filter_terms(self) -> (SyncManagerType, FmmuUsage) {
-        match self {
-            PdoDirection::MasterRead => (SyncManagerType::ProcessDataRead, FmmuUsage::Inputs),
-            PdoDirection::MasterWrite => (SyncManagerType::ProcessDataWrite, FmmuUsage::Outputs),
-        }
     }
 }

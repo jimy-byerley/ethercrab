@@ -764,3 +764,18 @@ pub trait FromEeprom: Sized {
             .map_err(|_| Error::Eeprom(EepromError::Decode))
     }
 }
+
+#[derive(Copy, Clone, Debug)]
+pub enum PdoDirection {
+    MasterRead,
+    MasterWrite,
+}
+
+impl PdoDirection {
+    pub(crate) fn filter_terms(self) -> (SyncManagerType, FmmuUsage) {
+        match self {
+            PdoDirection::MasterRead => (SyncManagerType::ProcessDataRead, FmmuUsage::Inputs),
+            PdoDirection::MasterWrite => (SyncManagerType::ProcessDataWrite, FmmuUsage::Outputs),
+        }
+    }
+}
